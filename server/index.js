@@ -1,79 +1,109 @@
 const express = require("express");
 const bodyParser = require("body-parser");
-const app = express();
+const aws = require("aws-sdk");
+const multerS3 = require("multer-s3");
 const multer = require("multer");
-const fs = require("fs-extra");
+const path = require("path");
+const router = express.Router();
 const cors = require("cors");
-app.use(bodyParser.urlencoded({ extended: true }));
-
 const MongoClient = require("mongodb").MongoClient;
 const ObjectId = require("mongodb").ObjectId;
-
-const url = "mongodb://localhost:27017";
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, "uploads");
-  },
-  filename: function (req, file, cb) {
-    cb(null, file.fieldname + "-" + Date.now());
-  },
-});
-
-const upload = multer({ storage: storage });
+const app = express();
+require("dotenv").config();
 
 let db;
 
+const url = process.env.URL;
+
 MongoClient.connect(url, (err, client) => {
   if (err) return console.log(err);
-  db = client.db("uploads");
+  db = client.db(process.env.DB);
   app.listen(3001, () => {
     console.log("Server listening on port 3001");
   });
 });
 
 app.use(cors());
+app.use(bodyParser.urlencoded({ extended: true }));
 
-app.get("/", function (req, res) {
-  res.json({ message: "Welcome in React Node Upload API" });
+const s3 = new aws.S3({
+  accessKeyId: process.env.ACCESS_KEY_ID,
+  secretAccessKey: process.env.SECRET_ACCESS_KEY,
+  Bucket: process.env.BUCKET,
 });
 
-app.post("/upload", upload.single("myImage"), (req, res) => {
-  const img = fs.readFileSync(req.file.path);
-  const encode_image = img.toString("base64");
-  // Define a JSONobject for the image attributes for saving to database
+const profileImgUpload = multer({
+  storage: multerS3({
+    s3: s3,
+    bucket: process.env.BUCKET,
+    acl: "public-read",
+    key: function (req, file, cb) {
+      cb(
+        null,
+        path.basename(file.originalname, path.extname(file.originalname)) +
+          "-" +
+          Date.now() +
+          path.extname(file.originalname)
+      );
+    },
+  }),
+  limits: { fileSize: 2000000 },
+  fileFilter: function (req, file, cb) {
+    checkFileType(file, cb);
+  },
+}).single("profileImage");
 
-  const finalImg = {
-    contentType: req.file.mimetype,
-    image: new Buffer(encode_image, "base64"),
-  };
-  db.collection("photos").insertOne(finalImg, (err, result) => {
-    if (err) return console.log(err);
+function checkFileType(file, cb) {
+  const filetypes = /jpeg|jpg|png|gif/;
+  const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+  const mimetype = filetypes.test(file.mimetype);
+  if (mimetype && extname) {
+    return cb(null, true);
+  } else {
+    cb("Error: Images Only!");
+  }
+}
 
-    res.redirect("/");
+app.post("/upload/:username", (req, res) => {
+  console.log("req ", req.file);
+  profileImgUpload(req, res, (error) => {
+    console.log("error", error);
+    if (error) {
+      console.log("errors", error);
+      res.json({ error: error });
+    } else {
+      if (req.file === undefined) {
+        res.json("Error: No File Selected");
+      } else {
+        const imageName = req.file.key;
+        const imageLocation = req.file.location;
+
+        db.collection(process.env.COLLECTION).replaceOne(
+          { username: req.params.username },
+          {
+            username: req.params.username,
+            fileName: req.file.key,
+            fileUrl: req.file.location,
+          },
+          { upsert: true },
+          (err, result) => {}
+        );
+
+        res.json({
+          image: imageName,
+          location: imageLocation,
+        });
+      }
+    }
   });
 });
 
-app.get("/photos", (req, res) => {
-  db.collection("photos")
-    .find()
-    .toArray((err, result) => {
-      const imgArray = result.map((element) => element._id);
-
-      if (err) return console.log(err);
-      res.send(imgArray);
-    });
-});
-
-app.get("/photo/:id", (req, res) => {
-  var filename = req.params.id;
-
-  db.collection("photos").findOne(
-    { _id: ObjectId(filename) },
+app.get("/photo/:username", (req, res) => {
+  db.collection(process.env.COLLECTION).findOne(
+    { username: req.params.username },
     (err, result) => {
       if (err) return console.log(err);
-      res.contentType(result.contentType);
-      res.send(result.image.buffer);
+      res.send(result);
     }
   );
 });
